@@ -47,6 +47,7 @@ Docker Container
 
 🔴 Kurzfristig · Dr. Müller Orthopädie
 📅 3 freie Termine in den nächsten 15 Tagen
+🗓 Nächster Termin: 10.03.2026 (in 4 Tagen)
 👉 Jetzt buchen
 
 ────────────────────────────
@@ -128,7 +129,7 @@ WEB_PORT=8080
 |---|---|---|
 | Telegram Bot Token | Token from @BotFather | — |
 | Telegram Chat ID | Group chat ID (negative number) | — |
-| Tage vorausschauen | Days ahead to check for slots (Doctolib API max: 15) | 15 |
+| Tage vorausschauen | Days ahead to check for slots (up to 365; beyond Doctolib's 15-day block, the bot jumps to the next free slot) | 15 |
 | Check-Intervall | Minutes between checks — applied after the next cycle, no restart needed | 5 |
 
 ### Doctor fields in the Web Dashboard

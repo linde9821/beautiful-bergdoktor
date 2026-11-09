@@ -13,7 +13,7 @@ import urllib.request
 # Allow running from /app directory in Docker
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from checker import run_check, sanitize_booking_url
+from checker import describe_earliest_slot, run_check, sanitize_booking_url
 import database as db
 
 
@@ -203,13 +203,14 @@ def main():
         doctor = result['doctor']
         slots = result['slots_total']
         days = result.get('upcoming_days', default_days)
-        urgency = '🔴 Kurzfristig' if result['earlier_slots'] else '🟡 Verfügbar'
+        urgency, earliest_text = describe_earliest_slot(result['earliest_slot'])
         slot_word = f'{slots} freier Termin' if slots == 1 else f'{slots} freie Termine'
         # M-4: sanitize booking_url before embedding in Telegram HTML
         safe_url = sanitize_booking_url(doctor.get('booking_url', ''))
         message += (
             f'{urgency} · <b>{doctor["name"]}</b>\n'
             f'📅 {slot_word} in den nächsten {days} Tagen\n'
+            f'🗓 Nächster Termin: {earliest_text}\n'
             f'👉 <a href="{safe_url}">Jetzt buchen</a>\n\n'
         )
 

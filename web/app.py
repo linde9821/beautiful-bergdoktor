@@ -12,7 +12,8 @@ from flask import (Flask, render_template, request, redirect,
 # Shared modules live in /app (parent of /app/web)
 sys.path.insert(0, '/app')
 import database as db
-from checker import run_check, sanitize_booking_url, _validate_doctolib_url
+from checker import (MAX_UPCOMING_DAYS, describe_earliest_slot, run_check,
+                     sanitize_booking_url, _validate_doctolib_url)
 
 app = Flask(__name__)
 
@@ -149,7 +150,7 @@ def build_and_send_telegram(results, upcoming_days=15):
         doctor = r['doctor']
         slots  = r['slots_total']
         days   = r.get('upcoming_days', upcoming_days)
-        urgency = '\U0001f534 Kurzfristig' if r.get('earlier_slots') else '\U0001f7e1 Verf\u00fcgbar'
+        urgency, earliest_text = describe_earliest_slot(r['earliest_slot'])
         slot_word = f'{slots} freier Termin' if slots == 1 else f'{slots} freie Termine'
         # M-4: sanitize booking_url before embedding in Telegram HTML
         safe_url = sanitize_booking_url(doctor.get('booking_url', ''))
@@ -157,6 +158,7 @@ def build_and_send_telegram(results, upcoming_days=15):
         message += (
             f'{urgency} \u00b7 <b>{doctor["name"]}</b>\n'
             f'\U0001f4c5 {slot_word} in den n\u00e4chsten {days} Tagen\n'
+            f'\U0001f5d3 N\u00e4chster Termin: {earliest_text}\n'
             f'\U0001f449 <a href="{safe_url}">Jetzt buchen</a>\n\n'
         )
 
@@ -271,7 +273,7 @@ def add_doctor():
             upcoming_days = int(request.form.get('upcoming_days', '15'))
         except ValueError:
             upcoming_days = 15
-        upcoming_days = max(0, min(15, upcoming_days))
+        upcoming_days = max(0, min(MAX_UPCOMING_DAYS, upcoming_days))
 
         err = _validate_doctor_form(name, availabilities_url, booking_url)
         if err:
@@ -302,7 +304,7 @@ def edit_doctor(doctor_id):
             upcoming_days = int(request.form.get('upcoming_days', '15'))
         except ValueError:
             upcoming_days = 15
-        upcoming_days = max(0, min(15, upcoming_days))
+        upcoming_days = max(0, min(MAX_UPCOMING_DAYS, upcoming_days))
 
         err = _validate_doctor_form(name, availabilities_url, booking_url)
         if err:

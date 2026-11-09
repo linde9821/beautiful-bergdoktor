@@ -17,8 +17,15 @@ USER_AGENT = (
     'Chrome/114.0.0.0 Safari/537.36'
 )
 
-# Doctolib API hard limit
+# Doctolib API hard limit (days returned per request)
 DOCTOLIB_MAX_LIMIT = 15
+
+# Longest look-ahead window selectable per doctor
+MAX_UPCOMING_DAYS = 365
+
+# How far away the earliest slot may be for each urgency label in notifications
+SHORT_TERM_DAYS = 14
+MEDIUM_TERM_DAYS = 60
 
 # URL constraints (H-1 / SSRF)
 _ALLOWED_SCHEMES   = {'https'}
@@ -48,6 +55,81 @@ def sanitize_booking_url(url: str) -> str:
         return 'https://www.doctolib.de/'
 
 
+def _fetch_availabilities(avail_url: str, start_date: date, doctor_name: str):
+    """Fetch one block of days from Doctolib. Returns (availabilities, error_message)."""
+    url_parts = urllib.parse.urlparse(avail_url)
+    query = dict(urllib.parse.parse_qsl(url_parts.query))
+    query.update({
+        'limit': DOCTOLIB_MAX_LIMIT,
+        'start_date': start_date,
+    })
+    url = url_parts._replace(query=urllib.parse.urlencode(query)).geturl()
+
+    req = urllib.request.Request(url)
+    req.add_header('User-Agent', USER_AGENT)
+    req.add_header('Accept', 'application/json, text/javascript, */*; q=0.01')
+    req.add_header('Accept-Language', 'de-DE,de;q=0.9,en;q=0.8')
+    req.add_header('Referer', 'https://www.doctolib.de/')
+    req.add_header('X-Requested-With', 'XMLHttpRequest')
+
+    try:
+        raw = urllib.request.urlopen(req, timeout=10).read()
+    except urllib.error.HTTPError as http_err:
+        raw = http_err.read()
+        body_preview = raw[:200].decode('utf-8', errors='replace')
+        logger.error(
+            "run_check HTTP %s for doctor '%s'. Response preview: %s",
+            http_err.code, doctor_name, body_preview,
+        )
+        return None, _http_error_to_user_message(http_err.code)
+
+    response_text = raw.decode('utf-8')
+
+    if not response_text.strip():
+        logger.error("run_check: empty response for doctor '%s'", doctor_name)
+        return None, 'Leere Antwort von Doctolib (möglicherweise blockiert)'
+
+    try:
+        return json.loads(response_text), None
+    except json.JSONDecodeError as json_err:
+        preview = response_text[:300]
+        logger.error(
+            "run_check: invalid JSON for doctor '%s'. Error: %s. Preview: %s",
+            doctor_name, json_err, preview,
+        )
+        # Detect common non-JSON responses
+        if '<html' in preview.lower() or '<!doctype' in preview.lower():
+            return None, 'Doctolib hat eine HTML-Seite zurückgegeben (Rate-Limit oder veraltete URL)'
+        return None, 'Ungültige Antwort von Doctolib (kein JSON)'
+
+
+def _next_slot_date(availabilities: dict):
+    """Return the date of Doctolib's `next_slot` hint, or None if absent or malformed."""
+    try:
+        return date.fromisoformat(availabilities['next_slot'][:10])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def describe_earliest_slot(earliest_slot: date) -> tuple:
+    """Return (urgency label, date text) for a notification about *earliest_slot*."""
+    days_away = (earliest_slot - date.today()).days
+    if days_away <= SHORT_TERM_DAYS:
+        label = '🔴 Kurzfristig'
+    elif days_away <= MEDIUM_TERM_DAYS:
+        label = '🟡 Mittelfristig'
+    else:
+        label = '🟢 Langfristig'
+
+    if days_away <= 0:
+        relative = 'heute'
+    elif days_away == 1:
+        relative = 'morgen'
+    else:
+        relative = f'in {days_away} Tagen'
+    return label, f'{earliest_slot.strftime("%d.%m.%Y")} ({relative})'
+
+
 def run_check(doctor: dict, upcoming_days: int) -> dict:
     """
     Check appointment availability for a single doctor on Doctolib.
@@ -58,7 +140,7 @@ def run_check(doctor: dict, upcoming_days: int) -> dict:
 
     Returns:
         dict with keys: doctor, slots_total, slots_exist, earlier_slots,
-                        availabilities, success, [error]
+                        earliest_slot, availabilities, success, [error]
     """
     doctor_name = doctor.get('name', '?')
 
@@ -68,54 +150,9 @@ def run_check(doctor: dict, upcoming_days: int) -> dict:
         # H-1: validate URL is a safe Doctolib HTTPS endpoint before fetching
         _validate_doctolib_url(avail_url, 'availabilities_url')
 
-        url_parts = urllib.parse.urlparse(avail_url)
-        query = dict(urllib.parse.parse_qsl(url_parts.query))
-        query.update({
-            'limit': DOCTOLIB_MAX_LIMIT,
-            'start_date': date.today(),
-        })
-        url = url_parts._replace(query=urllib.parse.urlencode(query)).geturl()
-
-        req = urllib.request.Request(url)
-        req.add_header('User-Agent', USER_AGENT)
-        req.add_header('Accept', 'application/json, text/javascript, */*; q=0.01')
-        req.add_header('Accept-Language', 'de-DE,de;q=0.9,en;q=0.8')
-        req.add_header('Referer', 'https://www.doctolib.de/')
-        req.add_header('X-Requested-With', 'XMLHttpRequest')
-
-        try:
-            raw = urllib.request.urlopen(req, timeout=10).read()
-        except urllib.error.HTTPError as http_err:
-            raw = http_err.read()
-            body_preview = raw[:200].decode('utf-8', errors='replace')
-            logger.error(
-                "run_check HTTP %s for doctor '%s'. Response preview: %s",
-                http_err.code, doctor_name, body_preview,
-            )
-            user_msg = _http_error_to_user_message(http_err.code)
-            return {'doctor': doctor, 'success': False, 'error': user_msg}
-
-        response_text = raw.decode('utf-8')
-
-        if not response_text.strip():
-            logger.error("run_check: empty response for doctor '%s'", doctor_name)
-            return {'doctor': doctor, 'success': False,
-                    'error': 'Leere Antwort von Doctolib (möglicherweise blockiert)'}
-
-        try:
-            availabilities = json.loads(response_text)
-        except json.JSONDecodeError as json_err:
-            preview = response_text[:300]
-            logger.error(
-                "run_check: invalid JSON for doctor '%s'. Error: %s. Preview: %s",
-                doctor_name, json_err, preview,
-            )
-            # Detect common non-JSON responses
-            if '<html' in preview.lower() or '<!doctype' in preview.lower():
-                user_msg = 'Doctolib hat eine HTML-Seite zurückgegeben (Rate-Limit oder veraltete URL)'
-            else:
-                user_msg = 'Ungültige Antwort von Doctolib (kein JSON)'
-            return {'doctor': doctor, 'success': False, 'error': user_msg}
+        availabilities, error = _fetch_availabilities(avail_url, date.today(), doctor_name)
+        if error:
+            return {'doctor': doctor, 'success': False, 'error': error}
 
         slots_total = availabilities['total']
 
@@ -127,8 +164,20 @@ def run_check(doctor: dict, upcoming_days: int) -> dict:
         else:
             cutoff_date = today + timedelta(days=upcoming_days)
 
+        # One request covers only DOCTOLIB_MAX_LIMIT days. When that block is empty,
+        # Doctolib names the next free slot, so one more request reaches it however
+        # far ahead it is.
+        next_date = _next_slot_date(availabilities)
+        block_is_empty = not any(day['slots'] for day in availabilities['availabilities'])
+        if block_is_empty and next_date and next_date <= cutoff_date:
+            followup, error = _fetch_availabilities(avail_url, next_date, doctor_name)
+            if error:
+                return {'doctor': doctor, 'success': False, 'error': error}
+            availabilities['availabilities'] += followup['availabilities']
+
         slots_in_window = 0
         earlier_slots = False
+        earliest_slot = None
         for day in availabilities['availabilities']:
             if not day['slots']:
                 continue
@@ -136,6 +185,8 @@ def run_check(doctor: dict, upcoming_days: int) -> dict:
             if slot_date <= cutoff_date:
                 slots_in_window += len(day['slots'])
                 earlier_slots = True
+                if earliest_slot is None or slot_date < earliest_slot:
+                    earliest_slot = slot_date
 
         slots_exist = slots_in_window > 0
 
@@ -144,6 +195,7 @@ def run_check(doctor: dict, upcoming_days: int) -> dict:
             'slots_total':    slots_in_window,
             'slots_exist':    slots_exist,
             'earlier_slots':  earlier_slots,
+            'earliest_slot':  earliest_slot,
             'availabilities': availabilities,
             'upcoming_days':  upcoming_days,
             'success':        True,
